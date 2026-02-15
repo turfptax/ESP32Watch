@@ -38,13 +38,17 @@ MONTHS = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
 SCREEN_CLOCK = 0
 SCREEN_INFO  = 1
 SCREEN_SETUP = 2
+SCREEN_WIFI  = 3   # WiFi scan (not in nav bar — entered from Setup)
 SCREEN_NAMES = ("Clock", "Info", "Setup")
 
 
 class WatchUI:
     """Watch face with touch navigation between screens."""
 
-    def __init__(self):
+    def __init__(self, log=None):
+        # Logger (from main.py — may be None if running standalone)
+        self._log = log
+
         # Initialize display
         print("Initializing display...")
         self.display = CO5300()
@@ -85,12 +89,17 @@ class WatchUI:
             touch_int_pin=self._touch_int,
         )
 
+        # Pass RTC to logger for accurate timestamps
+        if self._log:
+            self._log._rtc = self.rtc
+
         # Screen dimensions
         self.W = BOARD.LCD_WIDTH   # 410
         self.H = BOARD.LCD_HEIGHT  # 502
 
         # UI state
         self.screen = SCREEN_CLOCK
+        self._wifi_results = []    # Cached WiFi scan results
         self._last_minute = -1
         self._last_bat = -1
         self._last_touch_time = 0    # Debounce
@@ -197,6 +206,22 @@ class WatchUI:
                     self._needs_redraw = True
                     print(f"Touch: switched to {SCREEN_NAMES[i]} screen")
                 return
+
+        # Setup screen: check if WiFi row was tapped
+        if self.screen == SCREEN_SETUP and y < 400:
+            # WiFi is row index 3 (0-based) in the options list
+            # Rows start at y=125, each row is 55px tall
+            wifi_row_y = 125 + 3 * 55  # = 290
+            if 30 <= x <= self.W - 30 and wifi_row_y <= y <= wifi_row_y + 45:
+                self._start_wifi_scan()
+                return
+
+        # WiFi screen: tap anywhere to go back to Setup
+        if self.screen == SCREEN_WIFI:
+            self.screen = SCREEN_SETUP
+            self._needs_redraw = True
+            print("Touch: back to Setup from WiFi")
+            return
 
         # Tap anywhere in upper area = toggle between clock/info
         if y < 400:
@@ -381,6 +406,13 @@ class WatchUI:
                ACCENT2 if self._imu else BAT_LOW, 2)
         y += spacing
 
+        # SD Card status
+        sd_ok = self._log.has_sd if self._log else False
+        d.text("SD Card", 40, y, TEXT_DIM, 2)
+        d.text("OK" if sd_ok else "N/A", 230, y,
+               ACCENT2 if sd_ok else BAT_LOW, 2)
+        y += spacing
+
         # RTC time
         dt = self.rtc.datetime()
         t_str = f"{dt[3]:02d}:{dt[4]:02d}:{dt[5]:02d}"
@@ -410,7 +442,7 @@ class WatchUI:
             ("Brightness", "100%"),
             ("Time Zone", "UTC-5"),
             ("Temp Unit", "F"),
-            ("WiFi", "Off"),
+            ("WiFi", "Scan >"),
             ("Time Format", "24h"),
         ]
 
@@ -427,6 +459,119 @@ class WatchUI:
             val_w = len(value) * 16
             d.text(value, self.W - 50 - val_w, row_y + 14, ACCENT, 2)
 
+    # ─── Screen: WiFi scan ──────────────────────────────────────
+
+    def _start_wifi_scan(self):
+        """Start a WiFi scan and switch to the WiFi screen."""
+        print("WiFi: starting scan...")
+        self._wifi_results = []
+        self.screen = SCREEN_WIFI
+        self._needs_redraw = True
+
+        # Draw a "Scanning..." message first
+        self.display.fill(BG)
+        self._draw_status_bar()
+        self._center_text("WiFi Scan", 55, ACCENT, 3)
+        self._center_text("Scanning...", 200, TEXT_DIM, 2)
+        self.display.show()
+
+        try:
+            import network
+            wlan = network.WLAN(network.STA_IF)
+            was_active = wlan.active()
+            wlan.active(True)
+            time.sleep_ms(100)  # Let radio stabilize
+
+            results = wlan.scan()
+
+            if not was_active:
+                wlan.active(False)
+
+            # Sort by signal strength (RSSI, index 3), strongest first
+            results.sort(key=lambda r: r[3], reverse=True)
+
+            # Store top 8 for display
+            self._wifi_results = results[:8]
+
+            if self._log:
+                self._log.info(f"WiFi scan: {len(results)} networks found")
+                for r in results[:5]:
+                    ssid = r[0].decode("utf-8", "replace")
+                    rssi = r[3]
+                    self._log.info(f"  {ssid} ({rssi} dBm)")
+
+            print(f"WiFi: found {len(results)} networks")
+
+        except Exception as e:
+            print(f"WiFi scan error: {e}")
+            if self._log:
+                self._log.error(f"WiFi scan failed: {e}")
+            self._wifi_results = []
+
+        self._needs_redraw = True
+
+    def _draw_wifi_screen(self):
+        """Draw the WiFi scan results screen."""
+        d = self.display
+        y = 55
+
+        self._center_text("WiFi Scan", y, ACCENT, 3)
+        y += 45
+        self._draw_divider(y)
+        y += 15
+
+        if not self._wifi_results:
+            self._center_text("No networks found", y + 40, TEXT_DIM, 2)
+            self._center_text("Tap to go back", y + 80, TEXT_DIM, 1)
+            return
+
+        self.display.text(f"{len(self._wifi_results)} networks:", 40, y, TEXT_DIM, 1)
+        y += 18
+
+        for i, result in enumerate(self._wifi_results):
+            ssid = result[0].decode("utf-8", "replace")
+            rssi = result[3]
+
+            if not ssid:
+                ssid = "(hidden)"
+
+            # Truncate long SSIDs
+            if len(ssid) > 20:
+                ssid = ssid[:18] + ".."
+
+            # Signal strength color
+            if rssi > -50:
+                sig_color = ACCENT2      # Strong (green)
+            elif rssi > -70:
+                sig_color = ACCENT       # Medium (cyan)
+            elif rssi > -80:
+                sig_color = BAT_MID      # Weak (orange)
+            else:
+                sig_color = BAT_LOW      # Very weak (red)
+
+            # Signal bars indicator
+            bars = 4 if rssi > -50 else 3 if rssi > -65 else 2 if rssi > -80 else 1
+
+            row_y = y + i * 40
+
+            # SSID name
+            d.text(ssid, 40, row_y, TEXT_PRIMARY, 2)
+
+            # RSSI value + bars
+            rssi_str = f"{rssi}dBm"
+            d.text(rssi_str, 280, row_y, sig_color, 1)
+
+            # Simple bar indicator
+            bar_str = "|" * bars + "." * (4 - bars)
+            d.text(bar_str, 340, row_y + 1, sig_color, 1)
+
+            # Thin separator
+            if i < len(self._wifi_results) - 1:
+                self.display.hline(40, row_y + 30, self.W - 80, SEPARATOR)
+
+        # Tap hint at bottom
+        self._center_text("Tap anywhere to go back", 400, TEXT_DIM, 1)
+
     # ─── Main draw/update ─────────────────────────────────────
 
     def draw(self):
@@ -442,8 +587,12 @@ class WatchUI:
             self._draw_info_screen()
         elif self.screen == SCREEN_SETUP:
             self._draw_setup_screen()
+        elif self.screen == SCREEN_WIFI:
+            self._draw_wifi_screen()
 
-        self._draw_nav_buttons()
+        # Nav buttons on main screens only (not WiFi scan overlay)
+        if self.screen != SCREEN_WIFI:
+            self._draw_nav_buttons()
         d.show()
         self._needs_redraw = False
 

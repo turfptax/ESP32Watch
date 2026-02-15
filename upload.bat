@@ -14,6 +14,7 @@ mpremote connect %PORT% cp boot.py :boot.py
 mpremote connect %PORT% cp main.py :main.py
 mpremote connect %PORT% cp watch_ui.py :watch_ui.py
 mpremote connect %PORT% cp power_manager.py :power_manager.py
+mpremote connect %PORT% cp logger.py :logger.py
 mpremote connect %PORT% cp wifi_manager.py :wifi_manager.py
 mpremote connect %PORT% cp sdcard.py :sdcard.py
 mpremote connect %PORT% cp test_hardware.py :test_hardware.py
