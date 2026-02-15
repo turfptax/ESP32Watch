@@ -38,8 +38,9 @@ MONTHS = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
 SCREEN_CLOCK = 0
 SCREEN_INFO  = 1
 SCREEN_SETUP = 2
-SCREEN_WIFI  = 3   # WiFi scan (not in nav bar — entered from Setup)
-SCREEN_NAMES = ("Clock", "Info", "Setup")
+SCREEN_WIFI   = 3   # WiFi scan (not in nav bar — entered from Setup)
+SCREEN_UPDATE = 4   # OTA update (not in nav bar — entered from Setup)
+SCREEN_NAMES  = ("Clock", "Info", "Setup")
 
 
 class WatchUI:
@@ -100,6 +101,9 @@ class WatchUI:
         # UI state
         self.screen = SCREEN_CLOCK
         self._wifi_results = []    # Cached WiFi scan results
+        self._update_state = 'idle'  # idle|connecting|checking|ready|up_to_date|updating|error|no_ugit
+        self._update_info = {}       # check_for_updates() result
+        self._update_error = ''      # Error message string
         self._last_minute = -1
         self._last_bat = -1
         self._last_touch_time = 0    # Debounce
@@ -207,20 +211,43 @@ class WatchUI:
                     print(f"Touch: switched to {SCREEN_NAMES[i]} screen")
                 return
 
-        # Setup screen: check if WiFi row was tapped
+        # Setup screen: check if WiFi or Update rows were tapped
         if self.screen == SCREEN_SETUP and y < 400:
-            # WiFi is row index 3 (0-based) in the options list
             # Rows start at y=125, each row is 55px tall
-            wifi_row_y = 125 + 3 * 55  # = 290
-            if 30 <= x <= self.W - 30 and wifi_row_y <= y <= wifi_row_y + 45:
-                self._start_wifi_scan()
-                return
+            # WiFi is row index 3, Update is row index 4
+            wifi_row_y = 125 + 3 * 55    # = 290
+            update_row_y = 125 + 4 * 55  # = 345
+            if 30 <= x <= self.W - 30:
+                if wifi_row_y <= y <= wifi_row_y + 45:
+                    self._start_wifi_scan()
+                    return
+                if update_row_y <= y <= update_row_y + 45:
+                    self._start_update_check()
+                    return
 
         # WiFi screen: tap anywhere to go back to Setup
         if self.screen == SCREEN_WIFI:
             self.screen = SCREEN_SETUP
             self._needs_redraw = True
             print("Touch: back to Setup from WiFi")
+            return
+
+        # Update screen: state-dependent touch handling
+        if self.screen == SCREEN_UPDATE:
+            if self._update_state == 'ready':
+                # Upper area = confirm update, lower area = back
+                if y < 350:
+                    self._apply_update()
+                else:
+                    self.screen = SCREEN_SETUP
+                    self._needs_redraw = True
+                    print("Touch: cancelled update, back to Setup")
+            elif self._update_state in ('up_to_date', 'error', 'no_ugit'):
+                # Tap anywhere to go back
+                self.screen = SCREEN_SETUP
+                self._needs_redraw = True
+                print("Touch: back to Setup from Update")
+            # connecting/checking/updating states: ignore taps (busy)
             return
 
         # Tap anywhere in upper area = toggle between clock/info
@@ -443,7 +470,7 @@ class WatchUI:
             ("Time Zone", "UTC-5"),
             ("Temp Unit", "F"),
             ("WiFi", "Scan >"),
-            ("Time Format", "24h"),
+            ("Update", "OTA >"),
         ]
 
         for i, (label, value) in enumerate(options):
@@ -572,6 +599,218 @@ class WatchUI:
         # Tap hint at bottom
         self._center_text("Tap anywhere to go back", 400, TEXT_DIM, 1)
 
+    # ─── Screen: OTA Update ─────────────────────────────────────
+
+    def _show_update_status(self, msg):
+        """Quick helper to show a status message on the update screen."""
+        self.display.fill(BG)
+        self._draw_status_bar()
+        self._center_text("OTA Update", 55, ACCENT, 3)
+        self._draw_divider(100)
+        self._center_text(msg, 200, TEXT_DIM, 2)
+        self.display.show()
+
+    def _start_update_check(self):
+        """Connect to WiFi and check for available updates."""
+        print("Update: starting check...")
+        self.screen = SCREEN_UPDATE
+        self._update_state = 'connecting'
+        self._update_info = {}
+        self._update_error = ''
+
+        if self._log:
+            self._log.info("OTA update check started")
+
+        # Phase 1: Import ugit
+        self._show_update_status("Loading ugit...")
+        try:
+            import ugit
+        except ImportError:
+            self._update_state = 'no_ugit'
+            self._needs_redraw = True
+            if self._log:
+                self._log.warn("ugit not installed")
+            print("Update: ugit not installed")
+            return
+
+        # Phase 2: Connect WiFi
+        self._show_update_status("Connecting WiFi...")
+        try:
+            ugit.wificonnect()
+            print("Update: WiFi connected")
+        except Exception as e:
+            self._update_state = 'error'
+            self._update_error = f"WiFi: {e}"
+            self._needs_redraw = True
+            if self._log:
+                self._log.error(f"OTA WiFi failed: {e}")
+            print(f"Update: WiFi failed: {e}")
+            return
+
+        # Phase 3: Check for updates
+        self._show_update_status("Checking updates...")
+        self._update_state = 'checking'
+        try:
+            gc.collect()
+            info = ugit.check_for_updates(isconnected=True)
+            self._update_info = info
+            print(f"Update: new={len(info.get('new',[]))}, "
+                  f"changed={len(info.get('changed',[]))}, "
+                  f"deleted={len(info.get('deleted',[]))}")
+
+            total = (len(info.get('new', [])) +
+                     len(info.get('changed', [])) +
+                     len(info.get('deleted', [])))
+
+            if total == 0:
+                self._update_state = 'up_to_date'
+                if self._log:
+                    self._log.info("OTA: already up to date")
+            else:
+                self._update_state = 'ready'
+                if self._log:
+                    self._log.info(f"OTA: {total} file(s) to update")
+
+        except Exception as e:
+            self._update_state = 'error'
+            self._update_error = f"Check: {e}"
+            if self._log:
+                self._log.error(f"OTA check failed: {e}")
+            print(f"Update: check failed: {e}")
+
+        self._needs_redraw = True
+
+    def _apply_update(self):
+        """Pull all updates and reset the device."""
+        print("Update: applying...")
+        self._update_state = 'updating'
+        self._show_update_status("Updating...")
+
+        # Show warning
+        self._center_text("Do not power off!", 260, BAT_LOW, 2)
+        self.display.show()
+
+        if self._log:
+            self._log.info("OTA: pulling updates...")
+
+        try:
+            import ugit
+            gc.collect()
+            # reset_after=True will machine.reset() after success
+            ugit.pull_all(isconnected=True, reset_after=True)
+            # If we get here, reset_after was somehow False or failed
+        except Exception as e:
+            self._update_state = 'error'
+            self._update_error = f"Update: {e}"
+            self._needs_redraw = True
+            if self._log:
+                self._log.error(f"OTA pull failed: {e}")
+            print(f"Update: pull failed: {e}")
+
+    def _draw_update_screen(self):
+        """Draw the OTA update screen based on current state."""
+        d = self.display
+        y = 55
+
+        self._center_text("OTA Update", y, ACCENT, 3)
+        y += 45
+        self._draw_divider(y)
+        y += 30
+
+        state = self._update_state
+
+        if state == 'connecting':
+            self._center_text("Connecting to WiFi...", y + 60, TEXT_DIM, 2)
+
+        elif state == 'checking':
+            self._center_text("Checking for updates...", y + 60, TEXT_DIM, 2)
+
+        elif state == 'up_to_date':
+            self._center_text("Up to date!", y + 40, ACCENT2, 3)
+            self._center_text("No updates available", y + 80, TEXT_DIM, 2)
+            self._center_text("Tap to go back", 440, TEXT_DIM, 1)
+
+        elif state == 'ready':
+            info = self._update_info
+            n_new = len(info.get('new', []))
+            n_chg = len(info.get('changed', []))
+            n_del = len(info.get('deleted', []))
+            total = n_new + n_chg + n_del
+
+            self._center_text("Updates Available", y + 10, ACCENT, 2)
+            y_info = y + 50
+
+            if n_new > 0:
+                d.text(f"  New:     {n_new} file(s)", 60, y_info, ACCENT2, 2)
+                y_info += 30
+            if n_chg > 0:
+                d.text(f"  Changed: {n_chg} file(s)", 60, y_info, BAT_MID, 2)
+                y_info += 30
+            if n_del > 0:
+                d.text(f"  Removed: {n_del} file(s)", 60, y_info, BAT_LOW, 2)
+                y_info += 30
+
+            # Show file names (first few)
+            y_files = y_info + 10
+            all_files = (info.get('new', []) + info.get('changed', []))[:4]
+            for fname in all_files:
+                if len(fname) > 30:
+                    fname = ".." + fname[-28:]
+                d.text(fname, 50, y_files, TEXT_DIM, 1)
+                y_files += 14
+
+            # Confirm button
+            btn_y = 340
+            btn_x = 80
+            btn_w = self.W - 160
+            btn_h = 45
+            self._draw_rounded_rect(btn_x, btn_y, btn_w, btn_h, ACCENT2, fill=True)
+            lbl = "Tap to Update"
+            lbl_x = btn_x + (btn_w - len(lbl) * 16) // 2
+            d.text(lbl, lbl_x, btn_y + 14, BG, 2)
+
+            self._center_text("Tap below to cancel", 440, TEXT_DIM, 1)
+
+        elif state == 'updating':
+            self._center_text("Updating...", y + 40, ACCENT, 3)
+            self._center_text("Do not power off!", y + 90, BAT_LOW, 2)
+            # Progress hint
+            self._center_text("Device will restart", y + 140, TEXT_DIM, 1)
+            self._center_text("when complete", y + 156, TEXT_DIM, 1)
+
+        elif state == 'error':
+            self._center_text("Error", y + 20, BAT_LOW, 3)
+            # Word-wrap error message
+            err = self._update_error
+            ey = y + 70
+            for i in range(0, len(err), 30):
+                chunk = err[i:i + 30]
+                self._center_text(chunk, ey, TEXT_PRIMARY, 2)
+                ey += 26
+                if ey > 380:
+                    break
+            self._center_text("Tap to go back", 440, TEXT_DIM, 1)
+
+        elif state == 'no_ugit':
+            self._center_text("ugit not installed", y + 20, BAT_MID, 2)
+            ey = y + 70
+            d.text("Run in REPL:", 40, ey, TEXT_DIM, 2)
+            ey += 35
+            d.text("import mip", 40, ey, TEXT_PRIMARY, 1)
+            ey += 14
+            d.text("mip.install(", 40, ey, TEXT_PRIMARY, 1)
+            ey += 14
+            d.text("  'github:turfptax/ugit')", 40, ey, TEXT_PRIMARY, 1)
+            ey += 20
+            d.text("Then create config.json", 40, ey, TEXT_DIM, 1)
+            ey += 14
+            d.text("with WiFi + repo settings", 40, ey, TEXT_DIM, 1)
+            self._center_text("Tap to go back", 440, TEXT_DIM, 1)
+
+        else:
+            # idle — shouldn't normally be shown
+            self._center_text("Ready", y + 60, TEXT_DIM, 2)
+
     # ─── Main draw/update ─────────────────────────────────────
 
     def draw(self):
@@ -589,9 +828,11 @@ class WatchUI:
             self._draw_setup_screen()
         elif self.screen == SCREEN_WIFI:
             self._draw_wifi_screen()
+        elif self.screen == SCREEN_UPDATE:
+            self._draw_update_screen()
 
-        # Nav buttons on main screens only (not WiFi scan overlay)
-        if self.screen != SCREEN_WIFI:
+        # Nav buttons on main screens only (not overlay screens)
+        if self.screen not in (SCREEN_WIFI, SCREEN_UPDATE):
             self._draw_nav_buttons()
         d.show()
         self._needs_redraw = False
