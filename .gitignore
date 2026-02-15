@@ -1,0 +1,18 @@
+# ugit OTA config (contains WiFi credentials - NEVER commit)
+config.json
+ugit.backup
+ugit_log.txt
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / tools
+.vscode/
+.idea/
+.claude/
