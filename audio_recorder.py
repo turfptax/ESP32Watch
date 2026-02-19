@@ -144,7 +144,11 @@ class AudioRecorder:
         self._codec = ES8311(self._i2c)
         self._codec.init()
 
+        # Ensure I2S DOUT pin (speaker) stays low — we only use RX
+        Pin(BOARD.I2S_DOUT, Pin.OUT, value=0)
+
         # Init I2S in receive (mic) mode
+        # timeout=0 makes readinto() non-blocking so UI loop doesn't stall
         self._i2s = I2S(0,
                         sck=Pin(BOARD.I2S_BCLK),
                         ws=Pin(BOARD.I2S_WS),
@@ -153,14 +157,24 @@ class AudioRecorder:
                         bits=16,
                         format=I2S.MONO,
                         rate=BOARD.AUDIO_SAMPLE_RATE,
-                        ibuf=8192)
+                        ibuf=8192,
+                        timeout=0)
 
         # Allocate buffers (large ones go to PSRAM automatically)
         self._pre_buf = CircularBuffer(self._pre_buf_bytes)
-        self._read_buf = bytearray(1024)  # 32ms at 16 kHz, 16-bit
+        self._read_buf = bytearray(512)  # 16ms at 16 kHz — smaller for non-blocking
 
         self._state = STATE_IDLE
         self._trigger_count = 0
+        self._debug_count = 0    # Print first few readings for debug
+
+        # Verify I2S is returning data
+        import time as _time
+        _time.sleep_ms(100)  # Let DMA fill
+        test_buf = bytearray(256)
+        test_n = self._i2s.readinto(test_buf)
+        test_rms = self._calc_rms(test_buf, test_n) if test_n > 0 else -1
+        print(f"AudioRecorder: I2S test read: {test_n} bytes, RMS={test_rms}")
 
         if self._log:
             self._log.info("AudioRecorder: initialized")
@@ -189,12 +203,17 @@ class AudioRecorder:
 
         buf = self._read_buf
         n = self._i2s.readinto(buf)
-        if n <= 0:
+        if n is None or n <= 0:
             return
 
         # Compute RMS amplitude
         rms = self._calc_rms(buf, n)
         self._current_rms = rms
+
+        # Debug: print first 10 readings
+        if self._debug_count < 10:
+            print(f"  audio: {n}B rms={rms} thr={self.trigger_threshold}")
+            self._debug_count += 1
 
         if self._state == STATE_IDLE:
             # Feed pre-buffer

@@ -53,7 +53,7 @@ class Logger:
             self.info("Logger started (RAM only)")
 
     def _mount_sd(self):
-        """Try to mount the SD card at /sd."""
+        """Try to mount the SD card at /sd with retries."""
         # Check if already mounted
         try:
             os.stat("/sd")
@@ -62,29 +62,39 @@ class Logger:
         except OSError:
             pass
 
-        # Try hardware SDCard slot=3 (confirmed working on this board)
-        try:
-            from machine import SDCard
-            self._sd = SDCard(
-                slot=3,
-                sck=Pin(BOARD.SD_CLK),
-                mosi=Pin(BOARD.SD_CMD),
-                miso=Pin(BOARD.SD_DATA),
-                cs=Pin(BOARD.SD_CS),
-            )
-            os.mount(self._sd, "/sd")
-            self._sd_ok = True
-            print("Logger: SD card mounted")
-        except Exception as e:
-            # Deinit SDCard to release the SPI host it claimed
-            if self._sd is not None:
-                try:
-                    self._sd.deinit()
-                except Exception:
-                    pass
-                self._sd = None
-            print(f"Logger: SD mount failed ({e}), using RAM buffer")
-            self._sd_ok = False
+        # Try hardware SDCard slot=3 with retries
+        # ESP_ERR_INVALID_STATE (-259) can happen if SPI bus needs settling
+        from machine import SDCard
+        import time
+
+        for attempt in range(3):
+            try:
+                if attempt > 0:
+                    time.sleep_ms(200)
+                    print(f"Logger: SD retry {attempt + 1}/3...")
+
+                self._sd = SDCard(
+                    slot=3,
+                    sck=Pin(BOARD.SD_CLK),
+                    mosi=Pin(BOARD.SD_CMD),
+                    miso=Pin(BOARD.SD_DATA),
+                    cs=Pin(BOARD.SD_CS),
+                )
+                os.mount(self._sd, "/sd")
+                self._sd_ok = True
+                print("Logger: SD card mounted")
+                return
+            except Exception as e:
+                # Deinit SDCard to release the SPI host it claimed
+                if self._sd is not None:
+                    try:
+                        self._sd.deinit()
+                    except Exception:
+                        pass
+                    self._sd = None
+                if attempt == 2:
+                    print(f"Logger: SD mount failed after 3 attempts ({e}), using RAM buffer")
+                    self._sd_ok = False
 
     def _ensure_log_dir(self):
         """Create /sd/logs/ directory if it doesn't exist."""

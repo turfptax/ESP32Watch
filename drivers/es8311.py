@@ -3,9 +3,9 @@ ES8311 Low-Power Mono Audio Codec Driver for MicroPython
 I2C driver for ADC (microphone recording) on the
 Waveshare ESP32-S3-Touch-AMOLED-2.06.
 
-The ES8311 needs two things before it will respond on I2C:
-  1. CODEC_EN pin (GPIO46) driven HIGH to power the codec
-  2. MCLK signal on GPIO41 (generated via PWM at 256 * sample_rate)
+The ES8311 is always powered on this board (no gate on CODEC_EN).
+GPIO46 is actually the speaker amplifier (PA) enable — keep LOW for mic-only.
+MCLK signal on GPIO41 is generated via PWM at 256 * sample_rate.
 
 Register values derived from Espressif's esp-bsp es8311.c driver
 for MCLK=4.096 MHz, Fs=16 kHz, slave mode, I2S 16-bit format.
