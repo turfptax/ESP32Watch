@@ -143,22 +143,11 @@ class ES8311:
         self._codec_en = Pin(BOARD.CODEC_EN, Pin.OUT, value=1)
         time.sleep_ms(50)
 
-        # 2. Verify codec is on I2C bus (before MCLK — probe is I2C only)
-        if not self._probe():
-            alt = 0x19 if self._addr == 0x18 else 0x18
-            self._addr = alt
-            if not self._probe():
-                # Debug: print what we actually read
-                for a in (0x18, 0x19):
-                    try:
-                        self._i2c.writeto(a, bytes([0xFD]))
-                        v = self._i2c.readfrom(a, 1)[0]
-                        print(f"  ES8311 debug: addr 0x{a:02X} reg 0xFD = 0x{v:02X}")
-                    except Exception as e:
-                        print(f"  ES8311 debug: addr 0x{a:02X} error: {e}")
-                raise RuntimeError(
-                    "ES8311 not found at 0x18 or 0x19 (check CODEC_EN)")
-        print(f"ES8311: found at 0x{self._addr:02X}")
+        # 2. Skip probe — ES8311 shares addr 0x18 with FT3168 touch.
+        # After a failed import (stale touch state), probe reads get
+        # responses from the touch controller instead of the codec.
+        # The codec is confirmed always present at 0x18 on this board.
+        print(f"ES8311: using addr 0x{self._addr:02X}")
 
         # 3. Start MCLK via PWM: 256 * 16000 = 4.096 MHz
         self._mclk_pwm = PWM(Pin(BOARD.I2S_MCLK),
@@ -189,6 +178,10 @@ class ES8311:
 
         # 10. Set ADC digital volume to 0 dB
         self.set_adc_volume(0xBF)
+
+        # 11. Mute DAC output to prevent speaker feedback/noise
+        self._write_reg(_REG_DAC32, 0x00)     # DAC volume = 0
+        self._write_reg(_REG_SDP_IN, 0x4C)    # Mute DAC input (bit6=1)
 
         self._powered = True
         print("ES8311: initialized (16 kHz ADC, slave mode)")
