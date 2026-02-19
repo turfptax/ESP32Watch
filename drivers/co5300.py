@@ -61,6 +61,8 @@ class CO5300:
     Provides a framebuffer-based drawing interface.
     """
 
+    _spi_obj = None  # Class-level ref so we can deinit stale SPI from previous runs
+
     def __init__(self, width=None, height=None, rotation=0,
                  spi_id=1, baudrate=10_000_000,
                  cs=None, sclk=None, mosi=None, rst=None,
@@ -90,6 +92,13 @@ class CO5300:
         self._rst = Pin(rst or BOARD.LCD_RESET, Pin.OUT, value=1)
 
         # SPI bus — use SDIO0 as MOSI for single-lane mode
+        # Deinit stale SPI from a previous run (MicroPython doesn't free on GC)
+        if CO5300._spi_obj is not None:
+            try:
+                CO5300._spi_obj.deinit()
+            except Exception:
+                pass
+            CO5300._spi_obj = None
         self._spi = SPI(
             spi_id,
             baudrate=baudrate,
@@ -98,6 +107,7 @@ class CO5300:
             sck=Pin(sclk or BOARD.LCD_SCLK),
             mosi=Pin(mosi or BOARD.LCD_SDIO0),
         )
+        CO5300._spi_obj = self._spi
 
         # Framebuffer for drawing operations
         # RGB565 = 2 bytes/pixel. 410x502 = ~401 KB (fits in 8MB PSRAM)

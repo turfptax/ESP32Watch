@@ -42,6 +42,17 @@ I2S_DIN    = 42   # Microphone input
 I2S_WS     = 16   # Word select
 CODEC_EN   = 46   # Audio codec enable (set HIGH to enable)
 
+# ─── Audio Recording Defaults ─────────────────────────────────────
+AUDIO_SAMPLE_RATE    = 16_000      # 16 kHz — good for voice/barks
+AUDIO_MCLK_FREQ     = 4_096_000   # 256 * 16000 Hz
+AUDIO_MIC_GAIN_DB    = 24          # PGA gain for MEMS mic
+AUDIO_TRIGGER_THRESH = 3000        # RMS level to start recording
+AUDIO_SILENCE_THRESH = 1500        # RMS level to detect silence
+AUDIO_PRE_BUFFER_MS  = 1500        # Circular pre-buffer length
+AUDIO_SILENCE_MS     = 1500        # Silence duration to stop recording
+AUDIO_MAX_CLIP_SEC   = 30          # Safety cap per clip
+CLIPS_DIR            = "/sd/clips" # Where WAV files are saved
+
 # ─── SD Card (SPI slot=3) ────────────────────────────────────────
 SD_CLK     = 2
 SD_CMD     = 1

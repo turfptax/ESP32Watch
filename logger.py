@@ -76,6 +76,13 @@ class Logger:
             self._sd_ok = True
             print("Logger: SD card mounted")
         except Exception as e:
+            # Deinit SDCard to release the SPI host it claimed
+            if self._sd is not None:
+                try:
+                    self._sd.deinit()
+                except Exception:
+                    pass
+                self._sd = None
             print(f"Logger: SD mount failed ({e}), using RAM buffer")
             self._sd_ok = False
 

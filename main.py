@@ -1,13 +1,12 @@
 """
-main.py - ESP32-S3 Watch entry point.
-Launches the watch UI with full error recovery.
-Works standalone on battery (no WiFi/USB dependency).
-Logs events and crashes to SD card via logger.
+main.py - ESP32-S3 Dog Audio Monitor entry point.
+Launches the dog vocalization detector with full error recovery.
+Records dog barks/whines as WAV clips on the SD card for AI analysis.
 
 To stop and get a REPL: press Ctrl+C in Thonny/mpremote
 Then restart with:
-    from watch_ui import WatchUI
-    ui = WatchUI()
+    from dog_monitor_ui import DogMonitorUI
+    ui = DogMonitorUI()
     ui.run()
 """
 
@@ -21,16 +20,16 @@ def main():
     # Initialize logger early (before UI) so crashes get logged
     from logger import log
     log.init()
-    log.info("Watch booting")
+    log.info("Dog Monitor booting")
 
     try:
-        from watch_ui import WatchUI
-        ui = WatchUI(log=log)
-        log.info("Watch UI started")
+        from dog_monitor_ui import DogMonitorUI
+        ui = DogMonitorUI(log=log)
+        log.info("Dog Monitor started")
         ui.run()
     except KeyboardInterrupt:
-        log.info("Watch stopped by user (Ctrl+C)")
-        print("Watch stopped by user.")
+        log.info("Dog Monitor stopped by user (Ctrl+C)")
+        print("Dog Monitor stopped by user.")
     except Exception as e:
         _log_crash(log, e)
         _show_error(e)
