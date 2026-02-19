@@ -101,7 +101,7 @@ class ES8311:
 
     def __init__(self, i2c, addr=None):
         self._i2c = i2c
-        self._addr = addr or BOARD.AUDIO_ADDR  # 0x10
+        self._addr = addr or BOARD.AUDIO_ADDR
         self._mclk_pwm = None
         self._codec_en = None
         self._powered = False
@@ -123,9 +123,8 @@ class ES8311:
     def _probe(self):
         """Check if ES8311 responds at current address by reading chip ID."""
         try:
-            chip_id = self._read_reg(_REG_CHD2)
-            # Distinguish from FT3168 touch (also at 0x18):
-            # ES8311 reg 0xFE returns a valid chip ID, touch controller won't
+            chip_id = self._read_reg(_REG_CHD1)
+            # ES8311 reg 0xFD returns chip ID (typically 0x83)
             return chip_id != 0x00 and chip_id != 0xFF
         except OSError:
             return False

@@ -136,8 +136,6 @@ def test_i2c_scan():
         except Exception as e:
             print(f"  0x{addr:02X}: {e}")
 
-    return codec, i2c
-
 
 def test_live_audio(duration_sec=10):
     """Test 2: Read I2S audio and print RMS amplitude.
