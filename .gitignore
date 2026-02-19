@@ -16,3 +16,6 @@ Thumbs.db
 .vscode/
 .idea/
 .claude/
+
+# SD card files (ugit will delete these if not ignored!)
+/sd/
