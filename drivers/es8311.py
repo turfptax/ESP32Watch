@@ -47,10 +47,10 @@ _REG_SYS0C   = 0x0C   # System
 _REG_SYS0D   = 0x0D   # System: power, VMID
 _REG_SYS0E   = 0x0E   # System: ADC enable, PGA power
 _REG_SYS0F   = 0x0F   # System
-_REG_SYS10   = 0x10   # System
-_REG_SYS11   = 0x11   # System
-_REG_SYS12   = 0x12   # System
-_REG_SYS13   = 0x13   # System
+_REG_SYS10   = 0x10   # System: power config
+_REG_SYS11   = 0x11   # System: power config
+_REG_SYS12   = 0x12   # System: DAC power
+_REG_SYS13   = 0x13   # System: HP drive enable
 _REG_SYS14   = 0x14   # System: analog input select, MIC type
 
 _REG_ADC15   = 0x15   # ADC: ramp rate, HPF
@@ -138,16 +138,17 @@ class ES8311:
     # ─── Initialization ───────────────────────────────────────────
 
     def init(self):
-        """Full power-up: enable codec, start MCLK, configure for 16 kHz ADC."""
+        """Full power-up: enable codec, start MCLK, configure for 16 kHz ADC.
+
+        Register sequence follows Espressif esp-adf es8311.c reference driver:
+        es8311_codec_init() → es8311_start(MIC mode).
+        """
         # 1. GPIO46 is the speaker amplifier (PA) enable, NOT codec power.
         # Keep it LOW to silence the speaker — we only need the mic/ADC.
         self._codec_en = Pin(BOARD.CODEC_EN, Pin.OUT, value=0)
         time.sleep_ms(10)
 
         # 2. Skip probe — ES8311 shares addr 0x18 with FT3168 touch.
-        # After a failed import (stale touch state), probe reads get
-        # responses from the touch controller instead of the codec.
-        # The codec is confirmed always present at 0x18 on this board.
         print(f"ES8311: using addr 0x{self._addr:02X}")
 
         # 3. Start MCLK via PWM: 256 * 16000 = 4.096 MHz
@@ -156,33 +157,70 @@ class ES8311:
                              duty_u16=32768)  # 50% duty
         time.sleep_ms(10)
 
-        # 4. Soft reset
-        self._write_reg(_REG_RESET, 0x1F)
-        time.sleep_ms(20)
-        self._write_reg(_REG_RESET, 0x00)
-        time.sleep_ms(20)
+        # ── es8311_codec_init() sequence ──
 
-        # 5. Set GPIO44 for internal reference (noise immunity)
+        # REG44: initial GPIO/reference config
         self._write_reg(_REG_GPIO44, 0x08)
+        # REG01: clock gates on, MCLK from pin
+        self._write_reg(_REG_CLK01, 0x30)
+        # REG02-05: clock dividers (reset defaults OK for init)
+        self._write_reg(_REG_CLK02, 0x00)
+        self._write_reg(_REG_CLK03, 0x10)
+        self._write_reg(_REG_CLK04, 0x10)
+        self._write_reg(_REG_CLK05, 0x00)
+        # REG0B/0C: system registers (required by ref driver)
+        self._write_reg(_REG_SYS0B, 0x00)
+        self._write_reg(_REG_SYS0C, 0x00)
+        # REG10/11: system power config
+        self._write_reg(_REG_SYS10, 0x1F)
+        self._write_reg(_REG_SYS11, 0x7F)
+        # REG00: power on (0x80), then configure slave mode (clear bit6)
+        self._write_reg(_REG_RESET, 0x80)
+        time.sleep_ms(20)
 
-        # 6. Configure clock manager
+        # ── Configure clocks for our specific MCLK/Fs ──
         self._config_clocks()
 
-        # 7. Configure I2S format: slave, I2S standard, 16-bit
+        # ── Configure I2S format: slave, I2S standard, 16-bit ──
         self._config_format()
 
-        # 8. Power up analog circuitry and ADC
-        self._power_up_adc()
+        # ── es8311_codec_init() continued ──
+        # REG13: enable output to HP drive
+        self._write_reg(_REG_SYS13, 0x10)
+        # REG1B: ALC config
+        self._write_reg(_REG_ALC1B, 0x0A)
+        # REG1C: ADC EQ bypass, cancel DC offset
+        self._write_reg(_REG_ALC1C, 0x6A)
 
-        # 9. Set default mic gain
+        # ── es8311_start() for ADC/MIC mode ──
+        # Unmute ADC output (SDP_OUT bit6=0)
+        self._write_reg(_REG_SDP_OUT, 0x0C)
+        # ADC digital volume
+        self._write_reg(_REG_ADC17, 0xBF)
+        # REG0E: enable ADC modulator
+        self._write_reg(_REG_SYS0E, 0x02)
+        # REG12: power up DAC path (needed even for ADC-only)
+        self._write_reg(_REG_SYS12, 0x00)
+        # REG14: select analog MIC input
+        self._write_reg(_REG_SYS14, 0x1A)
+        # REG0D: power up analog, enable VMID
+        self._write_reg(_REG_SYS0D, 0x01)
+        time.sleep_ms(50)  # Wait for VMID to settle
+        # REG15: ADC HPF enable
+        self._write_reg(_REG_ADC15, 0x40)
+        # REG37: DAC EQ bypass
+        self._write_reg(_REG_DAC37, 0x08)
+        # REG45: GP control
+        self._write_reg(_REG_GP45, 0x00)
+        # REG44: switch to ADC active reference (critical for mic data!)
+        self._write_reg(_REG_GPIO44, 0x58)
+
+        # Set mic PGA gain
         self.set_mic_gain(BOARD.AUDIO_MIC_GAIN_DB)
 
-        # 10. Set ADC digital volume to 0 dB
-        self.set_adc_volume(0xBF)
-
-        # 11. Mute DAC output — we only use the ADC (mic) side
-        self._write_reg(_REG_DAC31, 0x00)     # DAC digital volume = 0
-        self._write_reg(_REG_SDP_IN, 0x4C)    # Mute DAC input (bit6=1)
+        # Mute DAC output — we only use the ADC (mic) side
+        self._write_reg(_REG_DAC31, 0x00)
+        self._write_reg(_REG_SDP_IN, 0x4C)  # Mute DAC input (bit6=1)
 
         self._powered = True
         print("ES8311: initialized (16 kHz ADC, slave mode)")
@@ -236,30 +274,6 @@ class ES8311:
 
         # REG09 (SDP in / DAC side): same format (for completeness)
         self._write_reg(_REG_SDP_IN, 0x0C)
-
-    def _power_up_adc(self):
-        """Power up analog reference, PGA, and ADC modulator."""
-        # REG0D: power up analog, enable VMID
-        self._write_reg(_REG_SYS0D, 0x01)
-        time.sleep_ms(50)  # Wait for VMID to settle
-
-        # REG0E: enable ADC modulator (bit1=1), PGA power on (bit6=0)
-        self._write_reg(_REG_SYS0E, 0x02)
-
-        # REG12: ADC soft ramp
-        self._write_reg(_REG_SYS12, 0x00)
-
-        # REG14: select analog MIC (bit6=0 for analog, bit5:4 for LINSEL)
-        self._write_reg(_REG_SYS14, 0x1A)
-
-        # REG15: ADC HPF enable, ramp rate
-        self._write_reg(_REG_ADC15, 0x40)
-
-        # REG1C: ADC equalizer bypass
-        self._write_reg(_REG_ALC1C, 0x6A)
-
-        # REG44: set internal reference
-        self._write_reg(_REG_GPIO44, 0x08)
 
     # ─── Public API ───────────────────────────────────────────────
 
