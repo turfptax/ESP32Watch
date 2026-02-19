@@ -123,10 +123,16 @@ class ES8311:
     def _probe(self):
         """Check if ES8311 responds at current address by reading chip ID."""
         try:
-            chip_id = self._read_reg(_REG_CHD1)
-            # ES8311 reg 0xFD returns chip ID (typically 0x83)
-            return chip_id != 0x00 and chip_id != 0xFF
-        except OSError:
+            # Read multiple ID registers to be sure
+            id1 = self._read_reg(_REG_CHD1)   # 0xFD — expect 0x83
+            id2 = self._read_reg(_REG_CHD2)   # 0xFE
+            ver = self._read_reg(_REG_CHVER)   # 0xFF
+            print(f"ES8311 probe 0x{self._addr:02X}: "
+                  f"ID1=0x{id1:02X} ID2=0x{id2:02X} VER=0x{ver:02X}")
+            # ES8311 chip ID1 is typically 0x83
+            return id1 != 0x00 and id1 != 0xFF
+        except OSError as e:
+            print(f"ES8311 probe 0x{self._addr:02X}: {e}")
             return False
 
     # ─── Initialization ───────────────────────────────────────────
@@ -137,21 +143,28 @@ class ES8311:
         self._codec_en = Pin(BOARD.CODEC_EN, Pin.OUT, value=1)
         time.sleep_ms(50)
 
-        # 2. Start MCLK via PWM: 256 * 16000 = 4.096 MHz
+        # 2. Verify codec is on I2C bus (before MCLK — probe is I2C only)
+        if not self._probe():
+            alt = 0x19 if self._addr == 0x18 else 0x18
+            self._addr = alt
+            if not self._probe():
+                # Debug: print what we actually read
+                for a in (0x18, 0x19):
+                    try:
+                        self._i2c.writeto(a, bytes([0xFD]))
+                        v = self._i2c.readfrom(a, 1)[0]
+                        print(f"  ES8311 debug: addr 0x{a:02X} reg 0xFD = 0x{v:02X}")
+                    except Exception as e:
+                        print(f"  ES8311 debug: addr 0x{a:02X} error: {e}")
+                raise RuntimeError(
+                    "ES8311 not found at 0x18 or 0x19 (check CODEC_EN)")
+        print(f"ES8311: found at 0x{self._addr:02X}")
+
+        # 3. Start MCLK via PWM: 256 * 16000 = 4.096 MHz
         self._mclk_pwm = PWM(Pin(BOARD.I2S_MCLK),
                              freq=BOARD.AUDIO_MCLK_FREQ,
                              duty_u16=32768)  # 50% duty
         time.sleep_ms(10)
-
-        # 3. Verify codec is on I2C bus (try configured addr, then alternate)
-        if not self._probe():
-            # ES8311 supports 0x18 (CE low) and 0x19 (CE high)
-            alt = 0x19 if self._addr == 0x18 else 0x18
-            self._addr = alt
-            if not self._probe():
-                raise RuntimeError(
-                    "ES8311 not found at 0x18 or 0x19 (check CODEC_EN)")
-        print(f"ES8311: found at 0x{self._addr:02X}")
 
         # 4. Soft reset
         self._write_reg(_REG_RESET, 0x1F)
