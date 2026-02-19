@@ -26,7 +26,7 @@ I2C_FREQ   = 400_000  # 400 kHz
 TOUCH_ADDR   = 0x18   # FT3168 capacitive touch (some boards use 0x38)
 IMU_ADDR     = 0x6B   # QMI8658 6-axis IMU
 RTC_ADDR     = 0x51   # PCF85063A real-time clock
-AUDIO_ADDR   = 0x18   # ES8311 audio codec (CE low=0x18, CE high=0x19, needs CODEC_EN)
+AUDIO_ADDR   = 0x18   # ES8311 audio codec (CE low=0x18) — DAC/speaker only
 PMIC_ADDR    = 0x34   # AXP2101 power management
 EXPANDER_ADDR = 0x40  # TCA9554 I2C GPIO expander
 
@@ -34,18 +34,26 @@ EXPANDER_ADDR = 0x40  # TCA9554 I2C GPIO expander
 TP_INT     = 38   # Touch interrupt (active low)
 TP_RESET   = 9    # Touch reset (active low)
 
-# ─── Audio (ES8311 + I2S) ───────────────────────────────────────
-I2S_MCLK   = 41
-I2S_BCLK   = 45
-I2S_DOUT   = 40   # Speaker output
-I2S_DIN    = 42   # Microphone input
-I2S_WS     = 16   # Word select
-CODEC_EN   = 46   # Audio codec enable (set HIGH to enable)
+# ─── Audio I2S Bus (shared by ES8311 DAC + ES7210 ADC) ──────────
+# Pin mapping verified from Waveshare BSP:
+#   BSP_I2S_SCLK=41, BSP_I2S_MCLK=16, BSP_I2S_LCLK=45
+I2S_SCLK   = 41   # BCLK (bit clock / serial clock)
+I2S_MCLK   = 16   # Master clock (was incorrectly on GPIO41)
+I2S_LRCLK  = 45   # WS / LRCLK (word select / left-right clock)
+I2S_DOUT   = 40   # Data out → ES8311 DAC (speaker)
+I2S_DIN    = 42   # Data in  ← ES7210 ADC (microphone)
+PA_EN      = 46   # Speaker power amplifier enable (active HIGH)
+
+# ─── ES8311 Audio Codec (DAC / speaker output) ─────────────────
+ES8311_ADDR = 0x18  # Shared with FT3168 touch (both always respond)
+
+# ─── ES7210 Audio ADC (microphone input) ───────────────────────
+ES7210_ADDR = 0x40  # Shared with TCA9554 GPIO expander
 
 # ─── Audio Recording Defaults ─────────────────────────────────────
 AUDIO_SAMPLE_RATE    = 16_000      # 16 kHz — good for voice/barks
-AUDIO_MCLK_FREQ     = 4_096_000   # 256 * 16000 Hz
-AUDIO_MIC_GAIN_DB    = 24          # PGA gain for MEMS mic
+AUDIO_MCLK_FREQ     = 4_096_000   # MCLK = 256 * Fs
+AUDIO_MIC_GAIN_DB    = 24          # ES7210 PGA gain for MEMS mic (0-37.5 dB)
 AUDIO_TRIGGER_THRESH = 3000        # RMS level to start recording
 AUDIO_SILENCE_THRESH = 1500        # RMS level to detect silence
 AUDIO_PRE_BUFFER_MS  = 1500        # Circular pre-buffer length
@@ -53,7 +61,7 @@ AUDIO_SILENCE_MS     = 1500        # Silence duration to stop recording
 AUDIO_MAX_CLIP_SEC   = 30          # Safety cap per clip
 CLIPS_DIR            = "/sd/clips" # Where WAV files are saved
 
-# ─── SD Card (SPI slot=3) ────────────────────────────────────────
+# ─── SD Card (SPI) ──────────────────────────────────────────────
 SD_CLK     = 2
 SD_CMD     = 1
 SD_DATA    = 3

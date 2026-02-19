@@ -1,9 +1,15 @@
 """
 Audio Recorder — sound-triggered WAV clip recording for dog vocalization detection.
 
-Continuously captures microphone audio via I2S, maintains a rolling pre-buffer
-in PSRAM, and starts saving a WAV clip when audio exceeds a volume threshold.
-Includes the pre-buffer in the clip so the beginning of a bark isn't clipped.
+Continuously captures microphone audio via I2S from the ES7210 ADC,
+maintains a rolling pre-buffer in PSRAM, and starts saving a WAV clip
+when audio exceeds a volume threshold.  Includes the pre-buffer in the
+clip so the beginning of a bark isn't clipped.
+
+Audio architecture on Waveshare ESP32-S3-Touch-AMOLED-2.06:
+  - ES7210 (4-ch ADC, addr 0x40) → microphone input (this driver uses it)
+  - ES8311 (DAC, addr 0x18)      → speaker output (not used here)
+  - I2S bus shared: SCLK=41, MCLK=16, LRCLK=45, DIN=42, DOUT=40
 
 State machine:
     IDLE → audio exceeds threshold → RECORDING
@@ -24,7 +30,7 @@ import struct
 from machine import Pin, I2S
 
 import board_config as BOARD
-from drivers.es8311 import ES8311
+from drivers.es7210 import ES7210
 
 
 # ─── States ───────────────────────────────────────────────────────
@@ -130,7 +136,7 @@ class AudioRecorder:
     # ─── Init / Deinit ────────────────────────────────────────────
 
     def init(self):
-        """Initialize ES8311 codec, I2S peripheral, and pre-buffer."""
+        """Initialize ES7210 ADC, I2S peripheral, and pre-buffer."""
         # Ensure clips directory exists
         try:
             os.stat(BOARD.CLIPS_DIR)
@@ -140,28 +146,37 @@ class AudioRecorder:
             except OSError:
                 pass
 
-        # Init codec
-        self._codec = ES8311(self._i2c)
+        # Silence speaker amplifier (PA_EN LOW)
+        Pin(BOARD.PA_EN, Pin.OUT, value=0)
+
+        # Init ES7210 ADC (microphone input codec)
+        # Note: ES7210 init() also starts MCLK on GPIO16
+        self._codec = ES7210(self._i2c)
         self._codec.init()
 
-        # Ensure I2S DOUT pin (speaker) stays low — we only use RX
+        # Ensure I2S DOUT pin (speaker data) stays low — we only use RX
         Pin(BOARD.I2S_DOUT, Pin.OUT, value=0)
 
         # Init I2S in receive (mic) mode
-        # ibuf=4096 gives ~128ms of DMA buffer at 16kHz mono 16-bit
+        # ES7210 outputs stereo (L=MIC1, R=MIC2) — we use STEREO format
+        # ibuf=8192 gives ~128ms of DMA buffer at 16kHz stereo 16-bit
         self._i2s = I2S(0,
-                        sck=Pin(BOARD.I2S_BCLK),
-                        ws=Pin(BOARD.I2S_WS),
+                        sck=Pin(BOARD.I2S_SCLK),
+                        ws=Pin(BOARD.I2S_LRCLK),
                         sd=Pin(BOARD.I2S_DIN),
                         mode=I2S.RX,
                         bits=16,
-                        format=I2S.MONO,
+                        format=I2S.STEREO,
                         rate=BOARD.AUDIO_SAMPLE_RATE,
-                        ibuf=4096)
+                        ibuf=8192)
 
         # Allocate buffers (large ones go to PSRAM automatically)
         self._pre_buf = CircularBuffer(self._pre_buf_bytes)
-        self._read_buf = bytearray(512)  # 16ms at 16 kHz
+        # I2S reads stereo frames (4 bytes each: L16 + R16).
+        # 1024 bytes = 256 stereo frames = 16ms at 16 kHz.
+        self._read_buf = bytearray(1024)
+        # Mono extraction buffer for pre-buffer and WAV writing
+        self._mono_buf = bytearray(512)
 
         self._state = STATE_IDLE
         self._trigger_count = 0
@@ -170,16 +185,23 @@ class AudioRecorder:
         # Verify I2S is returning data
         import time as _time
         _time.sleep_ms(100)  # Let DMA fill
-        test_buf = bytearray(256)
+        test_buf = bytearray(512)  # Stereo data
         test_n = self._i2s.readinto(test_buf)
-        test_rms = self._calc_rms(test_buf, test_n) if test_n > 0 else -1
-        print(f"AudioRecorder: I2S test read: {test_n} bytes, RMS={test_rms}")
+        # Extract mono from stereo for RMS test
+        test_mono = bytearray(256)
+        test_mono_n = 0
+        for i in range(0, test_n - 3, 4):
+            test_mono[test_mono_n] = test_buf[i]
+            test_mono[test_mono_n + 1] = test_buf[i + 1]
+            test_mono_n += 2
+        test_rms = self._calc_rms(test_mono, test_mono_n) if test_mono_n > 0 else -1
+        print(f"AudioRecorder: I2S test read: {test_n}B stereo → {test_mono_n}B mono, RMS={test_rms}")
 
         if self._log:
             self._log.info("AudioRecorder: initialized")
 
     def deinit(self):
-        """Stop recording, release I2S and codec."""
+        """Stop recording, release I2S and ES7210 ADC."""
         if self._state == STATE_RECORDING:
             self._stop_recording()
         if self._i2s:
@@ -191,11 +213,29 @@ class AudioRecorder:
 
     # ─── Main poll (call from main loop) ──────────────────────────
 
+    def _stereo_to_mono(self, stereo_buf, n_stereo):
+        """Extract left channel (MIC1) from interleaved stereo I2S data.
+
+        Stereo layout: [L0_lo, L0_hi, R0_lo, R0_hi, L1_lo, L1_hi, ...]
+        Mono output:   [L0_lo, L0_hi, L1_lo, L1_hi, ...]
+        Returns number of mono bytes written.
+        """
+        mono = self._mono_buf
+        n_mono = 0
+        for i in range(0, n_stereo - 3, 4):
+            mono[n_mono] = stereo_buf[i]
+            mono[n_mono + 1] = stereo_buf[i + 1]
+            n_mono += 2
+        return n_mono
+
     def poll(self):
         """Read audio from I2S and drive the recording state machine.
 
         Call this at ~30 Hz from the main loop.  Non-blocking — reads
         whatever data is available in the I2S DMA buffer.
+
+        I2S returns stereo data (L=MIC1, R=MIC2). We extract the left
+        channel (MIC1) for mono WAV recording.
         """
         if self._paused or self._i2s is None:
             return
@@ -205,18 +245,22 @@ class AudioRecorder:
         if n is None or n <= 0:
             return
 
-        # Compute RMS amplitude
-        rms = self._calc_rms(buf, n)
+        # Extract left channel (MIC1) from stereo to mono
+        n_mono = self._stereo_to_mono(buf, n)
+        mono = self._mono_buf
+
+        # Compute RMS amplitude on mono data
+        rms = self._calc_rms(mono, n_mono)
         self._current_rms = rms
 
         # Debug: print first 10 readings
         if self._debug_count < 10:
-            print(f"  audio: {n}B rms={rms} thr={self.trigger_threshold}")
+            print(f"  audio: {n}B stereo → {n_mono}B mono, rms={rms} thr={self.trigger_threshold}")
             self._debug_count += 1
 
         if self._state == STATE_IDLE:
-            # Feed pre-buffer
-            self._pre_buf.write(buf, n)
+            # Feed pre-buffer with mono data
+            self._pre_buf.write(mono, n_mono)
 
             # Check for trigger
             if rms >= self.trigger_threshold:
@@ -227,8 +271,8 @@ class AudioRecorder:
                 self._trigger_count = 0
 
         elif self._state == STATE_RECORDING:
-            # Write audio to WAV file
-            self._write_audio(buf, n)
+            # Write mono audio to WAV file
+            self._write_audio(mono, n_mono)
 
             # Check for silence
             if rms < self.silence_threshold:

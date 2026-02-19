@@ -1,11 +1,18 @@
 """
 ES8311 Low-Power Mono Audio Codec Driver for MicroPython
-I2C driver for ADC (microphone recording) on the
+I2C driver for DAC (speaker output) on the
 Waveshare ESP32-S3-Touch-AMOLED-2.06.
 
-The ES8311 is always powered on this board (no gate on CODEC_EN).
-GPIO46 is actually the speaker amplifier (PA) enable — keep LOW for mic-only.
-MCLK signal on GPIO41 is generated via PWM at 256 * sample_rate.
+Audio architecture on this board:
+  - ES7210 (addr 0x40) → 4-ch ADC for dual MEMS microphones
+  - ES8311 (this driver, addr 0x18) → DAC for speaker output
+
+The ES8311 shares I2C address 0x18 with FT3168 touch.
+GPIO46 (PA_EN) is the speaker amplifier enable — set HIGH to play audio.
+MCLK is on GPIO16 (shared with ES7210, started by ES7210 driver).
+
+NOTE: For mic recording, use drivers/es7210.py instead.
+This driver is kept for future speaker/playback functionality.
 
 Register values derived from Espressif's esp-bsp es8311.c driver
 for MCLK=4.096 MHz, Fs=16 kHz, slave mode, I2S 16-bit format.
@@ -18,8 +25,7 @@ Usage:
     i2c = I2C(0, sda=Pin(BOARD.I2C_SDA), scl=Pin(BOARD.I2C_SCL),
               freq=BOARD.I2C_FREQ)
     codec = ES8311(i2c)
-    codec.init()                # Powers up codec, starts MCLK, configures ADC
-    codec.set_mic_gain(24)      # 24 dB PGA gain
+    codec.init()                # Powers up codec for DAC output
 """
 
 import time
@@ -97,13 +103,16 @@ _MIC_GAIN_TABLE = {
 
 
 class ES8311:
-    """ES8311 codec driver — ADC (microphone) focused."""
+    """ES8311 codec driver — DAC (speaker output).
+
+    NOTE: Microphone input uses ES7210 (drivers/es7210.py), not this codec.
+    """
 
     def __init__(self, i2c, addr=None):
         self._i2c = i2c
-        self._addr = addr or BOARD.AUDIO_ADDR
+        self._addr = addr or BOARD.ES8311_ADDR
         self._mclk_pwm = None
-        self._codec_en = None
+        self._pa_pin = None
         self._powered = False
 
     # ─── Low-level I2C ────────────────────────────────────────────
@@ -138,24 +147,18 @@ class ES8311:
     # ─── Initialization ───────────────────────────────────────────
 
     def init(self):
-        """Full power-up: enable codec, start MCLK, configure for 16 kHz ADC.
+        """Full power-up: configure ES8311 for DAC output.
 
-        Register sequence follows Espressif esp-adf es8311.c reference driver:
-        es8311_codec_init() → es8311_start(MIC mode).
+        Register sequence follows Espressif esp-adf es8311.c reference driver.
+        MCLK is assumed to already be running (started by ES7210 driver).
+        PA (GPIO46) starts LOW — call enable_speaker() to enable.
         """
-        # 1. GPIO46 is the speaker amplifier (PA) enable, NOT codec power.
-        # Keep it LOW to silence the speaker — we only need the mic/ADC.
-        self._codec_en = Pin(BOARD.CODEC_EN, Pin.OUT, value=0)
+        # 1. Speaker PA starts off
+        self._pa_pin = Pin(BOARD.PA_EN, Pin.OUT, value=0)
         time.sleep_ms(10)
 
         # 2. Skip probe — ES8311 shares addr 0x18 with FT3168 touch.
-        print(f"ES8311: using addr 0x{self._addr:02X}")
-
-        # 3. Start MCLK via PWM: 256 * 16000 = 4.096 MHz
-        self._mclk_pwm = PWM(Pin(BOARD.I2S_MCLK),
-                             freq=BOARD.AUDIO_MCLK_FREQ,
-                             duty_u16=32768)  # 50% duty
-        time.sleep_ms(10)
+        print(f"ES8311: using addr 0x{self._addr:02X} (DAC mode)")
 
         # ── es8311_codec_init() sequence ──
 
@@ -321,25 +324,14 @@ class ES8311:
         """Re-init after standby."""
         if self._powered:
             return
-        # Restart MCLK
-        self._mclk_pwm = PWM(Pin(BOARD.I2S_MCLK),
-                             freq=BOARD.AUDIO_MCLK_FREQ,
-                             duty_u16=32768)
-        time.sleep_ms(10)
-        # Re-run clock + power-up config
-        self._config_clocks()
-        self._power_up_adc()
-        self.mute(False)
-        self.set_mic_gain(BOARD.AUDIO_MIC_GAIN_DB)
-        self.set_adc_volume(0xBF)
-        self._powered = True
+        self.init()
 
     def deinit(self):
-        """Full power down and disable codec."""
+        """Full power down and disable speaker PA."""
         self.standby()
-        # Disable codec power
-        if self._codec_en:
-            self._codec_en(0)
+        # Disable speaker PA
+        if self._pa_pin:
+            self._pa_pin(0)
         self._write_reg(_REG_GP45, 0x01)
 
     @property

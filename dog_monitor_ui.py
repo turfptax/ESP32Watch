@@ -2,7 +2,7 @@
 Dog Audio Monitor UI for Waveshare ESP32-S3-Touch-AMOLED-2.06
 Dedicated dog vocalization detector — replaces the watch UI.
 
-Continuously monitors audio via the ES8311 codec and I2S microphone.
+Continuously monitors audio via the ES7210 ADC and dual MEMS microphones.
 When a bark, whine, or vocalization exceeds the volume threshold,
 records a WAV clip to the SD card for later AI analysis.
 
