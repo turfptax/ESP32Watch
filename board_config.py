@@ -58,7 +58,7 @@ SD_CLK     = 2
 SD_CMD     = 1
 SD_DATA    = 3
 SD_CS      = 17
-SD_SLOT    = 3    # Confirmed working SPI slot for machine.SDCard
+SD_SLOT    = 2    # slot=2 works on this board (slot=3 gives ESP_ERR_INVALID_STATE)
 
 # ─── Buttons ────────────────────────────────────────────────────
 BOOT_BTN   = 0    # GPIO0 (low = pressed)
