@@ -581,10 +581,14 @@ class DogMonitorUI:
 
                 else:
                     # ── DISPLAY OFF: audio still active ──
-                    # Check for touch to wake display
+                    # Check for touch to wake display (INT pin active LOW)
                     if not self._touch_int():
-                        self._power.activity()
-                        self._needs_redraw = True
+                        # Debounce: wait and re-check
+                        time.sleep_ms(20)
+                        if not self._touch_int():
+                            self._power.wake_display()
+                            self._needs_redraw = True
+                            self._last_touch_time = time.ticks_ms()
 
                     time.sleep_ms(30)
 

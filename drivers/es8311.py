@@ -139,9 +139,10 @@ class ES8311:
 
     def init(self):
         """Full power-up: enable codec, start MCLK, configure for 16 kHz ADC."""
-        # 1. Enable codec power
-        self._codec_en = Pin(BOARD.CODEC_EN, Pin.OUT, value=1)
-        time.sleep_ms(50)
+        # 1. GPIO46 is the speaker amplifier (PA) enable, NOT codec power.
+        # Keep it LOW to silence the speaker — we only need the mic/ADC.
+        self._codec_en = Pin(BOARD.CODEC_EN, Pin.OUT, value=0)
+        time.sleep_ms(10)
 
         # 2. Skip probe — ES8311 shares addr 0x18 with FT3168 touch.
         # After a failed import (stale touch state), probe reads get
@@ -179,8 +180,8 @@ class ES8311:
         # 10. Set ADC digital volume to 0 dB
         self.set_adc_volume(0xBF)
 
-        # 11. Mute DAC output to prevent speaker feedback/noise
-        self._write_reg(_REG_DAC32, 0x00)     # DAC volume = 0
+        # 11. Mute DAC output — we only use the ADC (mic) side
+        self._write_reg(_REG_DAC31, 0x00)     # DAC digital volume = 0
         self._write_reg(_REG_SDP_IN, 0x4C)    # Mute DAC input (bit6=1)
 
         self._powered = True
