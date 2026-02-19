@@ -148,7 +148,7 @@ class AudioRecorder:
         Pin(BOARD.I2S_DOUT, Pin.OUT, value=0)
 
         # Init I2S in receive (mic) mode
-        # timeout=0 makes readinto() non-blocking so UI loop doesn't stall
+        # ibuf=4096 gives ~128ms of DMA buffer at 16kHz mono 16-bit
         self._i2s = I2S(0,
                         sck=Pin(BOARD.I2S_BCLK),
                         ws=Pin(BOARD.I2S_WS),
@@ -157,12 +157,11 @@ class AudioRecorder:
                         bits=16,
                         format=I2S.MONO,
                         rate=BOARD.AUDIO_SAMPLE_RATE,
-                        ibuf=8192,
-                        timeout=0)
+                        ibuf=4096)
 
         # Allocate buffers (large ones go to PSRAM automatically)
         self._pre_buf = CircularBuffer(self._pre_buf_bytes)
-        self._read_buf = bytearray(512)  # 16ms at 16 kHz — smaller for non-blocking
+        self._read_buf = bytearray(512)  # 16ms at 16 kHz
 
         self._state = STATE_IDLE
         self._trigger_count = 0
