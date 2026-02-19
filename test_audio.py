@@ -33,40 +33,108 @@ def _init_i2c():
 
 
 def test_codec_init():
-    """Test 1: Verify ES8311 appears on I2C and initializes."""
+    """Test 1: Scan I2C bus and verify ES8311 responds.
+
+    The ES8311 address is 0x18 (CE low) or 0x19 (CE high).
+    Note: FT3168 touch is also at 0x18, so we compare scans
+    before/after enabling GPIO46 to find new addresses.
+    """
     print("=" * 40)
     print("TEST: ES8311 Codec Init")
     print("=" * 40)
 
     i2c = _init_i2c()
 
-    # Scan before enabling codec
-    print("I2C scan (codec disabled):", [hex(a) for a in i2c.scan()])
+    # Scan BEFORE enabling codec power
+    before = i2c.scan()
+    print("I2C scan (CODEC_EN low):", [hex(a) for a in before])
 
-    # Enable codec power
+    # Enable codec power (GPIO46 HIGH)
     codec_en = Pin(BOARD.CODEC_EN, Pin.OUT, value=1)
-    time.sleep_ms(50)
+    time.sleep_ms(100)
 
-    # Scan after enabling codec
-    addrs = i2c.scan()
-    print("I2C scan (codec enabled):", [hex(a) for a in addrs])
+    # Scan AFTER enabling codec power
+    after = i2c.scan()
+    print("I2C scan (CODEC_EN high):", [hex(a) for a in after])
 
-    if BOARD.AUDIO_ADDR in addrs:
-        print(f"  ES8311 found at 0x{BOARD.AUDIO_ADDR:02X}")
+    # Find new addresses that appeared
+    new_addrs = [a for a in after if a not in before]
+    if new_addrs:
+        print(f"  NEW addresses after CODEC_EN: {[hex(a) for a in new_addrs]}")
     else:
-        print("  ERROR: ES8311 not found!")
+        print("  No new addresses appeared after CODEC_EN.")
+        print("  ES8311 may share 0x18 with touch, or use 0x19.")
+
+    # Try to find ES8311 — check 0x18 and 0x19
+    es_addr = None
+    for addr in [0x18, 0x19]:
+        if addr in after:
+            try:
+                # Read chip ID register (0xFD) — ES8311 should return a value
+                i2c.writeto(addr, bytes([0xFD]))
+                chip_id = i2c.readfrom(addr, 1)[0]
+                print(f"  Addr 0x{addr:02X}: chip ID reg 0xFD = 0x{chip_id:02X}")
+                # Also read version register
+                i2c.writeto(addr, bytes([0xFF]))
+                ver = i2c.readfrom(addr, 1)[0]
+                print(f"  Addr 0x{addr:02X}: version reg 0xFF = 0x{ver:02X}")
+                if chip_id != 0x00 and chip_id != 0xFF:
+                    es_addr = addr
+                    print(f"  → ES8311 likely at 0x{addr:02X}")
+            except Exception as e:
+                print(f"  Addr 0x{addr:02X}: error reading — {e}")
+
+    if es_addr is None:
+        print("  ERROR: Could not identify ES8311!")
+        print("  Try: test_audio.test_i2c_scan() for full debug")
         codec_en(0)
         return False
 
-    # Init codec
+    # Init codec with discovered address
     from drivers.es8311 import ES8311
-    codec = ES8311(i2c)
+    codec = ES8311(i2c, addr=es_addr)
     codec.init()
+    print(f"  PASS: ES8311 initialized at 0x{es_addr:02X}")
 
-    # Read back a register to verify
-    chip_ver = codec._read_reg(0xFF)
-    print(f"  Chip version: 0x{chip_ver:02X}")
-    print("  PASS: ES8311 initialized")
+    return codec, i2c
+
+
+def test_i2c_scan():
+    """Debug helper: detailed I2C scan with register probing."""
+    print("=" * 40)
+    print("DEBUG: Full I2C Scan")
+    print("=" * 40)
+
+    i2c = _init_i2c()
+
+    print("\n--- CODEC_EN LOW ---")
+    codec_en = Pin(BOARD.CODEC_EN, Pin.OUT, value=0)
+    time.sleep_ms(50)
+    before = i2c.scan()
+    print("Addresses:", [hex(a) for a in before])
+
+    print("\n--- CODEC_EN HIGH ---")
+    codec_en(1)
+    time.sleep_ms(100)
+    after = i2c.scan()
+    print("Addresses:", [hex(a) for a in after])
+
+    new = [a for a in after if a not in before]
+    gone = [a for a in before if a not in after]
+    print(f"\nNew:  {[hex(a) for a in new]}")
+    print(f"Gone: {[hex(a) for a in gone]}")
+
+    # Probe all addresses with ES8311 chip ID register
+    print("\n--- Probing ES8311 registers at all addresses ---")
+    for addr in after:
+        try:
+            i2c.writeto(addr, bytes([0xFD]))
+            d = i2c.readfrom(addr, 1)[0]
+            i2c.writeto(addr, bytes([0xFF]))
+            v = i2c.readfrom(addr, 1)[0]
+            print(f"  0x{addr:02X}: reg[0xFD]=0x{d:02X} reg[0xFF]=0x{v:02X}")
+        except Exception as e:
+            print(f"  0x{addr:02X}: {e}")
 
     return codec, i2c
 

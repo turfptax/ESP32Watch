@@ -26,7 +26,7 @@ I2C_FREQ   = 400_000  # 400 kHz
 TOUCH_ADDR   = 0x18   # FT3168 capacitive touch (some boards use 0x38)
 IMU_ADDR     = 0x6B   # QMI8658 6-axis IMU
 RTC_ADDR     = 0x51   # PCF85063A real-time clock
-AUDIO_ADDR   = 0x10   # ES8311 audio codec (needs CODEC_EN HIGH)
+AUDIO_ADDR   = 0x18   # ES8311 audio codec (CE low=0x18, CE high=0x19, needs CODEC_EN)
 PMIC_ADDR    = 0x34   # AXP2101 power management
 EXPANDER_ADDR = 0x40  # TCA9554 I2C GPIO expander
 

@@ -120,6 +120,16 @@ class ES8311:
         cur = self._read_reg(reg)
         self._write_reg(reg, (cur & ~mask) | (val & mask))
 
+    def _probe(self):
+        """Check if ES8311 responds at current address by reading chip ID."""
+        try:
+            chip_id = self._read_reg(_REG_CHD2)
+            # Distinguish from FT3168 touch (also at 0x18):
+            # ES8311 reg 0xFE returns a valid chip ID, touch controller won't
+            return chip_id != 0x00 and chip_id != 0xFF
+        except OSError:
+            return False
+
     # ─── Initialization ───────────────────────────────────────────
 
     def init(self):
@@ -134,12 +144,15 @@ class ES8311:
                              duty_u16=32768)  # 50% duty
         time.sleep_ms(10)
 
-        # 3. Verify codec is on I2C bus
-        try:
-            chip_id = self._read_reg(_REG_CHD2)
-            print(f"ES8311: chip ID = 0x{chip_id:02X}")
-        except OSError:
-            raise RuntimeError("ES8311 not found on I2C (check CODEC_EN)")
+        # 3. Verify codec is on I2C bus (try configured addr, then alternate)
+        if not self._probe():
+            # ES8311 supports 0x18 (CE low) and 0x19 (CE high)
+            alt = 0x19 if self._addr == 0x18 else 0x18
+            self._addr = alt
+            if not self._probe():
+                raise RuntimeError(
+                    "ES8311 not found at 0x18 or 0x19 (check CODEC_EN)")
+        print(f"ES8311: found at 0x{self._addr:02X}")
 
         # 4. Soft reset
         self._write_reg(_REG_RESET, 0x1F)
