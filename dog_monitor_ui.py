@@ -98,6 +98,16 @@ class DogMonitorUI:
             touch_int_pin=self._touch_int,
         )
 
+        # ── BOOT button (GPIO0, active LOW) ──
+        self._boot_btn = Pin(BOARD.BOOT_BTN, Pin.IN, Pin.PULL_UP)
+        self._boot_pressed_at = 0     # ticks_ms when press started
+        self._boot_was_pressed = False # edge detection
+        self._boot_long_handled = False
+
+        # ── AXP2101 power key polling ──
+        # Enable power key IRQs in PMIC (short press + long press)
+        self._pmic_pkey_init()
+
         # ── UI state ──
         self._screen = SCREEN_MAIN
         self._needs_redraw = True
@@ -108,6 +118,7 @@ class DogMonitorUI:
         self._rec_blink = False
         self._last_blink_time = 0
         self._sd_free_mb = self._get_sd_free_mb()
+        self._paused = False
 
         # Settings screen state
         self._settings_items = [
@@ -129,11 +140,126 @@ class DogMonitorUI:
 
     def _tca9554_init(self):
         try:
-            self.i2c.writeto(BOARD.EXPANDER_ADDR, bytes([0x03, 0x00]))
+            # EXIO6 = PWR button input (bit6=1), rest = outputs (bit=0)
+            self.i2c.writeto(BOARD.EXPANDER_ADDR, bytes([0x03, 0x40]))
             self.i2c.writeto(BOARD.EXPANDER_ADDR, bytes([0x01, 0xFF]))
-            print("TCA9554: outputs enabled")
+            print("TCA9554: outputs enabled, EXIO6=input (PWR btn)")
         except Exception as e:
             print(f"TCA9554 error: {e}")
+
+    def _pmic_pkey_init(self):
+        """Enable AXP2101 power key short/long press IRQ detection."""
+        try:
+            # IRQ_EN1 (0x41): enable power key IRQs
+            # bit0=PKEY_POSITIVE, bit1=PKEY_NEGATIVE, bit2=PKEY_LONG, bit3=PKEY_SHORT
+            self.pmic._write_reg(0x41, 0x0C)  # Short press + long press
+            # Clear any pending
+            self.pmic._write_reg(0x49, 0xFF)
+            print("AXP2101: power key IRQs enabled")
+        except Exception as e:
+            print(f"AXP2101 pkey init error: {e}")
+
+    def _poll_pmic_pkey(self):
+        """Poll AXP2101 for power key events. Returns 'short', 'long', or None."""
+        try:
+            status = self.pmic._read_reg(0x49)
+            if status & 0x0C:  # Any power key event
+                # Clear by writing back
+                self.pmic._write_reg(0x49, 0xFF)
+                if status & 0x04:  # Long press (>1s, but <6s which is HW shutdown)
+                    return 'long'
+                if status & 0x08:  # Short press
+                    return 'short'
+        except:
+            pass
+        return None
+
+    def _poll_boot_button(self):
+        """Poll BOOT button (GPIO0) for press/long-press. Returns 'short', 'long', or None."""
+        pressed = not self._boot_btn()  # Active LOW
+        now = time.ticks_ms()
+
+        if pressed and not self._boot_was_pressed:
+            # Rising edge (just pressed)
+            self._boot_pressed_at = now
+            self._boot_was_pressed = True
+            self._boot_long_handled = False
+            return None
+
+        if pressed and self._boot_was_pressed:
+            # Held down — check for long press (2 seconds)
+            if not self._boot_long_handled and \
+               time.ticks_diff(now, self._boot_pressed_at) >= 2000:
+                self._boot_long_handled = True
+                return 'long'
+            return None
+
+        if not pressed and self._boot_was_pressed:
+            # Falling edge (just released)
+            self._boot_was_pressed = False
+            if not self._boot_long_handled:
+                return 'short'
+
+        return None
+
+    def _handle_buttons(self):
+        """Process physical button events."""
+        # Check BOOT button
+        boot_event = self._poll_boot_button()
+        if boot_event == 'short':
+            if not self._power.is_display_on:
+                self._power.wake_display()
+                self._needs_redraw = True
+            else:
+                # Short press while display on: refresh display
+                self._sd_free_mb = self._get_sd_free_mb()
+                self._needs_redraw = True
+            return
+
+        if boot_event == 'long':
+            # Toggle pause/resume recording
+            self._paused = not self._paused
+            if self._paused:
+                self.recorder.pause()
+                print("Recording PAUSED (boot long press)")
+            else:
+                self.recorder.resume()
+                print("Recording RESUMED (boot long press)")
+            self._needs_redraw = True
+            return
+
+        # Check AXP2101 power key
+        pkey_event = self._poll_pmic_pkey()
+        if pkey_event == 'short':
+            if not self._power.is_display_on:
+                self._power.wake_display()
+                self._needs_redraw = True
+            else:
+                # Short press while display on: show battery info briefly
+                self._sd_free_mb = self._get_sd_free_mb()
+                self._needs_redraw = True
+            return
+
+        if pkey_event == 'long':
+            # Long press (1-5s): software shutdown
+            # (6s+ is handled by AXP2101 hardware automatically)
+            print("Power key long press — shutting down...")
+            self._shutdown()
+            return
+
+    def _shutdown(self):
+        """Clean shutdown: stop recording, save state, power off."""
+        d = self.display
+        d.fill(BG)
+        d.text("Shutting down...", 80, 230, ORANGE, 2)
+        d.show()
+
+        # Stop recording cleanly
+        self.recorder.deinit()
+        time.sleep_ms(500)
+
+        # Power off via AXP2101
+        self.pmic.power_off()
 
     def _touch_init(self):
         self._touch_rst(0)
@@ -305,7 +431,10 @@ class DogMonitorUI:
     def _draw_rec_status_full(self):
         """Draw recording status area (y=155..200)."""
         d = self.display
-        if self.recorder.is_recording:
+        if self._paused:
+            d.text("PAUSED", 50, 167, ORANGE, 2)
+            d.text("(hold BOOT to resume)", 50, 190, TEXT_DIM, 1)
+        elif self.recorder.is_recording:
             # Red dot
             d.circle(30, 175, 8, REC_RED, True)
             dur = self.recorder.current_clip_duration
@@ -449,7 +578,10 @@ class DogMonitorUI:
         # Clear status area
         d.rect(0, 155, W, 50, BG, True)
 
-        if self.recorder.is_recording:
+        if self._paused:
+            d.text("PAUSED", 50, 167, ORANGE, 2)
+            d.text("(hold BOOT to resume)", 50, 190, TEXT_DIM, 1)
+        elif self.recorder.is_recording:
             # Blinking red dot
             now = time.ticks_ms()
             if time.ticks_diff(now, self._last_blink_time) > 500:
@@ -552,15 +684,26 @@ class DogMonitorUI:
         """Main loop — audio monitoring with optional display sleep.
 
         Audio recording continues even when the display is off.
+        Physical buttons work in all states:
+          BOOT short press → wake display / refresh
+          BOOT long press (2s) → pause/resume recording
+          PWR short press → wake display
+          PWR long press (1-5s) → software shutdown
+          PWR hold 6s+ → hardware power off (AXP2101)
         Press Ctrl+C to stop.
         """
         print("Starting Dog Audio Monitor...")
+        print("  BOOT short: wake/refresh  |  BOOT long: pause/resume")
+        print("  PWR short: wake           |  PWR long: shutdown")
         self.draw()
 
         try:
             while True:
                 # ALWAYS poll audio, regardless of display state
                 self.recorder.poll()
+
+                # ALWAYS poll physical buttons
+                self._handle_buttons()
 
                 if self._power.is_display_on:
                     # ── ACTIVE PHASE: display on ──
