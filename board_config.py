@@ -53,9 +53,9 @@ ES7210_ADDR = 0x40  # Shared with TCA9554 GPIO expander
 # ─── Audio Recording Defaults ─────────────────────────────────────
 AUDIO_SAMPLE_RATE    = 16_000      # 16 kHz — good for voice/barks
 AUDIO_MCLK_FREQ     = 4_096_000   # MCLK = 256 * Fs
-AUDIO_MIC_GAIN_DB    = 24          # ES7210 PGA gain for MEMS mic (0-37.5 dB)
-AUDIO_TRIGGER_THRESH = 3000        # RMS level to start recording
-AUDIO_SILENCE_THRESH = 1500        # RMS level to detect silence
+AUDIO_MIC_GAIN_DB    = 33          # ES7210 PGA gain for MEMS mic (0-37.5 dB)
+AUDIO_TRIGGER_THRESH = 500         # RMS level to start recording
+AUDIO_SILENCE_THRESH = 100         # RMS level to detect silence
 AUDIO_PRE_BUFFER_MS  = 1500        # Circular pre-buffer length
 AUDIO_SILENCE_MS     = 1500        # Silence duration to stop recording
 AUDIO_MAX_CLIP_SEC   = 30          # Safety cap per clip
